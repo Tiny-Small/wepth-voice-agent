@@ -216,3 +216,16 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Voice-agent local state and credentials
+.env
+.env.*
+!.env.example
+.envrc
+*.pem
+*.key
+*.wav
+*.mp3
+*.ogg
+browser_profiles/
+playwright_profiles/

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wepth-voice-agent"
+version = "0.1.0"
+description = "Real-time voice agent with deterministic browser actions and Level 2 Browser.FIND"
+requires-python = ">=3.12"
+dependencies = ["pydantic>=2,<3", "httpx>=0.27,<1"]
+
+[project.optional-dependencies]
+voice = [
+  "assemblyai>=1.5.4,<2",
+  "sounddevice>=0.5,<0.6",
+  "numpy>=1.26,<2.2",
+  "browser-use==0.13.10",
+]
+test = ["pytest>=8", "pytest-asyncio>=0.23"]
+local-models = ["transformers>=4.40,<5", "torch>=2.2", "huggingface-hub>=0.23"]
+
+[tool.setuptools.package-data]
+"ping_ponder.agentic.adapters" = ["scripts/*.ps1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+markers = ["integration: opt-in tests that control desktop applications"]
