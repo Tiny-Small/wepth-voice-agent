@@ -5,23 +5,39 @@ from types import SimpleNamespace
 
 import pytest
 
-from ping_ponder.agentic.browser_use_slice import (
-    BrowserAction, BrowserCompletionStatus, BrowserDecision, BrowserObservation,
-    BrowserTaskExecutor, JevBrowserCapability,
+from ping_ponder.agentic.adapters.memory import (
+    MemoryBrowserAdapter,
+    MemorySpotifyAdapter,
 )
-from ping_ponder.agentic.goals import SemanticGoal
+from ping_ponder.agentic.browser_use_slice import (
+    BrowserAction,
+    BrowserCompletionStatus,
+    BrowserDecision,
+    BrowserObservation,
+    BrowserTaskExecutor,
+    JevBrowserCapability,
+)
 from ping_ponder.agentic.capabilities.browser import WORLD_SCHEMA
-from ping_ponder.agentic.adapters.memory import MemoryBrowserAdapter, MemorySpotifyAdapter
-from ping_ponder.agentic.capabilities.spotify import WORLD_SCHEMA as SPOTIFY_WORLD_SCHEMA
+from ping_ponder.agentic.capabilities.spotify import (
+    WORLD_SCHEMA as SPOTIFY_WORLD_SCHEMA,
+)
 from ping_ponder.agentic.execution_config import AdapterBundle
-from ping_ponder.agentic.span import ExtractedSpan
-from ping_ponder.agentic.wiring import build_default_registry, build_default_world
-from ping_ponder.agentic.spine import VoiceActionSpine
 from ping_ponder.agentic.goal_builder import GoalBuilder
-from ping_ponder.agentic.wiring import RuleBasedGlobalJev, RuleBasedLocalJevs
+from ping_ponder.agentic.goals import SemanticGoal
+from ping_ponder.agentic.jev_ultrafast_backend import JevUltrafastExecutor
+from ping_ponder.agentic.span import ExtractedSpan
+from ping_ponder.agentic.spine import VoiceActionSpine
+from ping_ponder.agentic.wiring import (
+    RuleBasedGlobalJev,
+    RuleBasedLocalJevs,
+    build_default_registry,
+    build_default_world,
+)
 from ping_ponder.voice.events import FinalTranscript, SpeechStarted, TranscriptState
-from ping_ponder.voice.fast_voice import ParallelVoiceCoordinator, ParallelVoiceSettings, Route
-
+from ping_ponder.voice.fast_voice import (
+    ParallelVoiceCoordinator,
+    ParallelVoiceSettings,
+)
 
 FIND = "Find the Browser Use repository on GitHub"
 
@@ -81,9 +97,10 @@ class Verifier:
                 else BrowserCompletionStatus.UNCERTAIN)
 
 
-def spine_for(page, *, browser_open=False):
-    browser_find = JevBrowserCapability(BrowserTaskExecutor(
-        page, UncertainController(), completion_verifier=Verifier()))
+def spine_for(page, *, browser_open=False, browser_find=None):
+    if browser_find is None:
+        browser_find = JevBrowserCapability(BrowserTaskExecutor(
+            page, UncertainController(), completion_verifier=Verifier()))
     browser_state = {**WORLD_SCHEMA, "browser.running": browser_open}
     registry = build_default_registry(
         local_jevs=RuleBasedLocalJevs(),
@@ -100,17 +117,42 @@ def event(turn, text, revision=1):
 
 
 @pytest.mark.asyncio
-async def test_natural_language_find_reaches_existing_executor_and_world_state():
+@pytest.mark.parametrize("backend", ["browser_use", "jev_ultrafast"])
+async def test_natural_language_find_reaches_level_two_executor_and_world_state(backend):
     page = Page()
-    spine, browser_find = spine_for(page)
-    outcome = await spine.resolve_final(FIND)
-    assert outcome.goal.goal_type == "FIND"
-    assert outcome.goal.argument("site") == "GitHub"
-    assert outcome.goal.argument("target") == "Browser Use repository"
-    assert outcome.report.executed == ("FindWithGroundedBrowser",)
-    assert outcome.report.satisfied
-    assert browser_find.last_result.completion.status is BrowserCompletionStatus.SATISFIED
-    assert spine.world.get("browser.current_url") == page.url
+    browser_find = None
+    if backend == "jev_ultrafast":
+        class Agent:
+            def __init__(self, url, task):
+                self.browser = SimpleNamespace(observe=self.observe)
+
+            def observe(self, screenshot=False):
+                return {"url": page.url, "title": "browser-use/browser-use",
+                        "text": "browser-use repository", "fingerprint": "repo", "actions": []}
+
+            def command(self, name, body=None):
+                observed = self.observe()
+                return ({"status": "predicted", "page": observed} if name == "predict"
+                        else {"status": "done", "page": observed, "decisions": [{"choice": "DONE"}]})
+
+            def close(self):
+                pass
+
+        browser_find = JevBrowserCapability(JevUltrafastExecutor(
+            Verifier(), agent_factory=Agent))
+    spine, browser_find = spine_for(page, browser_find=browser_find)
+    try:
+        outcome = await spine.resolve_final(FIND)
+        assert outcome.goal.goal_type == "FIND"
+        assert outcome.goal.argument("site") == "GitHub"
+        assert outcome.goal.argument("target") == "Browser Use repository"
+        assert outcome.report.executed == ("FindWithGroundedBrowser",)
+        assert outcome.report.satisfied
+        assert browser_find.last_result.completion.status is BrowserCompletionStatus.SATISFIED
+        assert spine.world.get("browser.current_url") == page.url
+    finally:
+        if backend == "jev_ultrafast":
+            await browser_find.executor.close()
 
 
 @pytest.mark.asyncio

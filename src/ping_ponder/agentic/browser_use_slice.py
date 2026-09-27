@@ -8,10 +8,11 @@ import logging
 import re
 import time
 import uuid
+from collections import Counter
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal, Mapping, Protocol
-from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urljoin, urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -286,6 +287,10 @@ class BrowserCompletionVerifier(Protocol):
     async def verify(self, task: BrowserTask, observation: BrowserObservation) -> BrowserCompletionStatus: ...
 
 
+class BrowserTaskRunner(Protocol):
+    async def execute(self, goal: SemanticGoal) -> BrowserTaskResult: ...
+
+
 class JevBrowserCompletionVerifier:
     """A bounded, grounded completion Choice; never invents an action or evidence."""
 
@@ -378,15 +383,18 @@ def _completion_eligible(task: BrowserTask, observation: BrowserObservation) -> 
     )):
         return False
 
+    target_terms = [word for word in re.findall(r"[\w]+", task.target.casefold())
+                    if word not in {"page", "site", "website", "repository", "repo", "project",
+                                    "article", "guide", "documentation", "docs", "the", "a", "an"}]
+    if not target_terms:
+        return False
+
     site = task.semantic_goal.argument("site")
     if not site:
         # A bare one-term target ("Mercury", "Java", etc.) does not identify
         # which common entity/page the user means. Keep the result uncertain until
         # the utterance or an explicit site supplies enough grounding. This is a
         # specificity check only; target words need not match the current page.
-        target_terms = [word for word in re.findall(r"[\w]+", task.target.casefold())
-                        if word not in {"page", "site", "website", "repository", "repo", "project",
-                                        "article", "guide", "documentation", "docs", "the", "a", "an"}]
         if len(target_terms) < 2:
             return False
         return True
@@ -413,6 +421,25 @@ def _completion_eligible(task: BrowserTask, observation: BrowserObservation) -> 
         if re.sub(r"\W", "", label) in compact_site:
             return any(host == domain or host.endswith("." + domain) for domain in domains)
     return True
+
+
+def _conflicting_named_entity_identity(task: BrowserTask, observation: BrowserObservation) -> bool:
+    """Reject a longer, different URL name that merely contains the requested name.
+
+    Apply this only to explicit named artifacts with a URL slug. Descriptive goals
+    and child pages remain semantic questions for Jev Completion.
+    """
+    words = re.findall(r"[\w]+", task.target.casefold())
+    if not words or words[-1] not in {"repository", "repo", "project", "profile", "package", "organization"}:
+        return False
+    name = [word for word in words[:-1] if word not in {"the", "a", "an"}]
+    if not name:
+        return False
+    slug = unquote(urlsplit(observation.url).path.rstrip("/").rsplit("/", 1)[-1]).casefold()
+    slug_words = re.findall(r"[\w]+", slug.replace("_", "-"))
+    if slug_words and slug_words[-1] in {"html", "htm", "php", "md"}:
+        slug_words.pop()
+    return bool(slug_words and Counter(name) <= Counter(slug_words) and slug_words != name)
 
 
 def grounded_action_candidates(
@@ -768,6 +795,7 @@ class BrowserTaskExecutor:
         verified_observations: dict[str, BrowserCompletionStatus] = {}
         previous_action: BrowserAction | None = None
         navigation_evidence: list[str] = []
+        navigation_target_url: str | None = None
 
         def finish(completion: BrowserCompletion) -> BrowserTaskResult:
             timings.append({"stage": "completion", "latency_s": time.monotonic() - task_started,
@@ -803,6 +831,10 @@ class BrowserTaskExecutor:
                                     BrowserCompletionStatus.UNSATISFIED,
                                     BrowserCompletionStatus.UNCERTAIN):
                     decision = BrowserCompletionStatus.UNCERTAIN
+                if (decision is BrowserCompletionStatus.SATISFIED
+                        and _conflicting_named_entity_identity(task, observation)):
+                    decision = BrowserCompletionStatus.UNSATISFIED
+                    emit(logger, "browser_completion_identity_conflict", url=observation.url)
             except Exception as error:
                 emit(logger, "browser_jev_completion_error", error_type=type(error).__name__)
             finally:
@@ -976,15 +1008,9 @@ class BrowserTaskExecutor:
                             BrowserCompletionStatus.BLOCKED,
                             reason="repeated browser action made no grounded progress",
                         ))
-                    if action.kind is BrowserActionKind.CLICK:
-                        clicked = next((element for element in observation.elements
-                                        if element.index == action.index), None)
-                        if clicked is not None:
-                            label = " ".join(clicked.text.split())
-                            if label:
-                                navigation_evidence.append(label[:240])
-                            if clicked.href:
-                                navigation_evidence.append(clicked.href[:240])
+                    clicked = (next((element for element in observation.elements
+                                     if element.index == action.index), None)
+                               if action.kind is BrowserActionKind.CLICK else None)
                     action_started = time.monotonic()
                     try:
                         result = dict(await self.browser.act(action))
@@ -1001,6 +1027,14 @@ class BrowserTaskExecutor:
                         timings.append(action_timing)
                         emit(logger, "browser_action_timing", action=action.kind.value,
                              number=len(results) + 1, latency_seconds=elapsed)
+                    navigation_evidence = []
+                    navigation_target_url = None
+                    if clicked is not None and clicked.href:
+                        navigation_target_url = urljoin(observation.url, clicked.href)
+                        label = " ".join(clicked.text.split())
+                        if label:
+                            navigation_evidence.append(label[:240])
+                        navigation_evidence.append(clicked.href[:240])
                 except StaleBrowserAction as error:
                     previous_action = None
                     memory = (memory + f"\nstale action rejected: {error}")[-2000:]
@@ -1026,6 +1060,11 @@ class BrowserTaskExecutor:
                 # candidates, so same-URL DOM rewrites invalidate remaining indices.
                 observation_started = time.monotonic()
                 fresh = await self._observe()
+                if (navigation_target_url is not None
+                        and urlsplit(navigation_target_url)._replace(fragment="")
+                        != urlsplit(fresh.url)._replace(fragment="")):
+                    navigation_evidence = []
+                    navigation_target_url = None
                 observation_timing = {
                     "stage": "observation",
                     "number": sum(item["stage"] == "observation" for item in timings) + 1,
@@ -1083,7 +1122,7 @@ class BrowserTaskExecutor:
 class JevBrowserCapability:
     """Capability seam that projects SemanticGoal and returns coarse fresh state."""
 
-    def __init__(self, executor: BrowserTaskExecutor) -> None:
+    def __init__(self, executor: BrowserTaskRunner) -> None:
         self.executor = executor
         self.last_result: BrowserTaskResult | None = None
 

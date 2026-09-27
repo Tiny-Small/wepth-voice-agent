@@ -124,6 +124,28 @@ async def test_lookalike_repository_does_not_trigger_jev_completion():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["Browser Use repository", "browser use repository"])
+async def test_jev_satisfied_cannot_accept_different_entity_with_target_words(target):
+    goal = SemanticGoal("Browser", "FIND", {"site": "GitHub", "target": target})
+    decisions = Decisions("SATISFIED")
+    result = await BrowserTaskExecutor(Pages(LOOKALIKE), Controller(),
+        completion_verifier=JevBrowserCompletionVerifier(decisions, model="jev")).execute(goal)
+    assert result.completion.status is not BrowserCompletionStatus.SATISFIED
+    assert len(decisions.calls) == 1
+    assert decisions.calls[0][1]["observation"]["url"] == LOOKALIKE.url
+
+
+@pytest.mark.asyncio
+async def test_jev_satisfied_cannot_accept_longer_repository_name_with_contiguous_target():
+    longer = replace(LOOKALIKE, url="https://example.org/other/browser-use-agent-datasets",
+                     title="browser-use-agent-datasets repository")
+    goal = SemanticGoal("Browser", "FIND", {"site": "example.org", "target": "Browser Use repository"})
+    result = await BrowserTaskExecutor(Pages(longer), Controller(),
+        completion_verifier=JevBrowserCompletionVerifier(Decisions("SATISFIED"), model="jev")).execute(goal)
+    assert result.completion.status is not BrowserCompletionStatus.SATISFIED
+
+
+@pytest.mark.asyncio
 async def test_descriptive_destination_reaches_completion_without_contiguous_target_phrase():
     goal = SemanticGoal("Browser", "FIND", {
         "site": "Wikipedia", "target": "Python programming language article",
@@ -132,6 +154,24 @@ async def test_descriptive_destination_reaches_completion_without_contiguous_tar
         "python-article", "https://en.wikipedia.org/wiki/Python_(programming_language)",
         "Python (programming language) - Wikipedia", "Python is a high-level programming language.",
         frozenset(), "python-article",
+    )
+    decisions = Decisions("SATISFIED")
+    result = await BrowserTaskExecutor(Pages(destination), Controller(),
+        completion_verifier=JevBrowserCompletionVerifier(decisions, model="jev")).execute(goal)
+    assert result.completion.status is BrowserCompletionStatus.SATISFIED
+    assert len(decisions.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_descriptive_documentation_child_page_can_still_be_satisfied():
+    goal = SemanticGoal("Browser", "FIND", {
+        "site": "docs.python.org", "target": "Python asyncio task scheduling documentation",
+    })
+    destination = BrowserObservation(
+        "asyncio-tasks", "https://docs.python.org/3/library/asyncio-task.html",
+        "Coroutines and Tasks — Python documentation",
+        "Coroutines, Tasks, and Task Groups provide asyncio scheduling guidance.",
+        frozenset(), "asyncio-tasks",
     )
     decisions = Decisions("SATISFIED")
     result = await BrowserTaskExecutor(Pages(destination), Controller(),
@@ -225,6 +265,63 @@ async def test_completion_receives_grounded_clicked_result_text():
 
 
 @pytest.mark.asyncio
+async def test_clicked_result_identity_is_not_supplied_for_a_different_destination():
+    class RedirectedPages(Pages):
+        async def observe(self):
+            if self.page is SEARCH:
+                return replace(SEARCH, elements=(BrowserElement(
+                    index=7, tag="a", text="Unrelated result", href="https://github.com/other/project"),))
+            return self.destination
+
+    decisions = Decisions("SATISFIED")
+    result = await BrowserTaskExecutor(RedirectedPages(), Controller(),
+        completion_verifier=JevBrowserCompletionVerifier(decisions, model="jev")).execute(GOAL)
+    assert result.completion.status is BrowserCompletionStatus.SATISFIED
+    assert decisions.calls[0][1]["observation"]["grounded_navigation_evidence"] == []
+
+
+@pytest.mark.asyncio
+async def test_previous_click_evidence_cannot_leak_after_a_new_navigation():
+    first = replace(REPOSITORY, observation_id="first", url="https://github.com/other/project",
+                    title="GitHub - other/project", dom="Other project", grounding_fingerprint="first")
+
+    class MultiplePages:
+        def __init__(self):
+            self.page = SEARCH
+
+        async def observe(self):
+            if self.page is SEARCH:
+                return replace(SEARCH, elements=(BrowserElement(
+                    index=7, tag="a", text="Other project", href=first.url),))
+            return self.page
+
+        async def act(self, action):
+            self.page = first if action.kind.value == "click" else REPOSITORY
+            return {}
+
+    class NavigateAfterClick:
+        def __init__(self):
+            self.calls = 0
+
+        async def next_actions(self, task, observation, available_actions, memory):
+            self.calls += 1
+            if self.calls == 1:
+                return BrowserDecision(actions=[BrowserAction(kind="click", index=7, observation_id="search")])
+            return BrowserDecision(actions=[BrowserAction(kind="navigate", url=REPOSITORY.url)])
+
+    class SequenceDecisions(Decisions):
+        async def decide(self, *, model, state, questions):
+            self.answer = "NOT_SATISFIED" if state["observation"]["url"] == first.url else "SATISFIED"
+            return await super().decide(model=model, state=state, questions=questions)
+
+    decisions = SequenceDecisions("NOT_SATISFIED")
+    result = await BrowserTaskExecutor(MultiplePages(), NavigateAfterClick(),
+        completion_verifier=JevBrowserCompletionVerifier(decisions, model="jev")).execute(GOAL)
+    assert result.completion.status is BrowserCompletionStatus.SATISFIED
+    assert decisions.calls[-1][1]["observation"]["grounded_navigation_evidence"] == []
+
+
+@pytest.mark.asyncio
 async def test_completion_prompt_preserves_uncertainty_for_underspecified_targets():
     decisions = Decisions("UNCERTAIN")
     goal = SemanticGoal("Browser", "FIND", {"target": "Mercury"})
@@ -251,4 +348,15 @@ async def test_bare_one_term_without_site_remains_uncertain():
     result = await BrowserTaskExecutor(Pages(destination), Controller(),
         completion_verifier=JevBrowserCompletionVerifier(decisions, model="jev")).execute(goal)
     assert result.completion.status is BrowserCompletionStatus.UNCERTAIN
+    assert decisions.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["repository", "the repository", "documentation"])
+async def test_page_type_only_target_cannot_be_satisfied_on_a_named_site(target):
+    goal = SemanticGoal("Browser", "FIND", {"site": "GitHub", "target": target})
+    decisions = Decisions("SATISFIED")
+    result = await BrowserTaskExecutor(Pages(LOOKALIKE), Controller(),
+        completion_verifier=JevBrowserCompletionVerifier(decisions, model="jev")).execute(goal)
+    assert result.completion.status is not BrowserCompletionStatus.SATISFIED
     assert decisions.calls == []

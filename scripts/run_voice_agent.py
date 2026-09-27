@@ -10,12 +10,16 @@ import sys
 
 import httpx
 
-from ping_ponder.agentic.reply import SilentReplyComposer
 from ping_ponder.agentic.browser_use_slice import (
-    BrowserTaskExecutor, BrowserUseSessionAdapter, JevBrowserActionChooser,
-    JevBrowserCapability, JevBrowserCompletionVerifier, ModelBrowserController,
+    BrowserTaskExecutor,
+    BrowserUseSessionAdapter,
+    JevBrowserActionChooser,
+    JevBrowserCapability,
+    JevBrowserCompletionVerifier,
+    ModelBrowserController,
 )
 from ping_ponder.agentic.execution_config import ExecutionSettings
+from ping_ponder.agentic.reply import SilentReplyComposer
 from ping_ponder.agentic.wiring import aclose_jevs, build_chat_session
 from ping_ponder.providers.openrouter import OpenRouterProvider
 from ping_ponder.providers.openrouter_decisions import OpenRouterDecisionsProvider
@@ -31,9 +35,12 @@ from ping_ponder.voice.cli import (
     resolve_backend_settings,
 )
 from ping_ponder.voice.coordinator import CoordinatorSettings
-from ping_ponder.voice.fast_voice import OpenAICompatibleFastVoice, ParallelVoiceSettings
-from ping_ponder.voice.fish_audio import FISH_AUDIO_ENDPOINT, FishAudioSynthesizer
 from ping_ponder.voice.events import FinalTranscript, TranscriptState
+from ping_ponder.voice.fast_voice import (
+    OpenAICompatibleFastVoice,
+    ParallelVoiceSettings,
+)
+from ping_ponder.voice.fish_audio import FISH_AUDIO_ENDPOINT, FishAudioSynthesizer
 from ping_ponder.voice.wiring import build_voice_runtime
 
 
@@ -51,22 +58,33 @@ class TextOutputSynthesizer:
         return None
 
 
-def build_browser_find(backend):
+def build_browser_find(backend, *, headless=None, browser_backend=None):
     """Compose the same Level 2 executor and browser surface as the FIND demo."""
+    selected = browser_backend or os.environ.get("BROWSER_BACKEND", "browser_use")
+    if selected not in {"browser_use", "jev_ultrafast"}:
+        raise ValueError(f"unsupported BROWSER_BACKEND: {selected}")
     jev_provider = OpenRouterDecisionsProvider()
-    browser_provider = OpenRouterProvider()
-    browser_session = BrowserUseSessionAdapter()
-    capability = JevBrowserCapability(BrowserTaskExecutor(
-        browser_session,
-        ModelBrowserController(browser_provider, model=backend.browser_controller_model),
-        max_decisions=8,
-        completion_verifier=JevBrowserCompletionVerifier(
-            jev_provider, model=backend.local_jev_model),
-        action_chooser=JevBrowserActionChooser(
-            jev_provider, model=backend.local_jev_model, formulation="baseline"),
-        initial_action_candidates=True,
-        native_site_jev=True,
-    ))
+    verifier = JevBrowserCompletionVerifier(jev_provider, model=backend.local_jev_model)
+    if selected == "jev_ultrafast":
+        from ping_ponder.agentic.jev_ultrafast_backend import JevUltrafastExecutor
+        executor = JevUltrafastExecutor(verifier, policy_model=backend.local_jev_model)
+        browser_session = executor
+        browser_provider = None
+    else:
+        browser_provider = OpenRouterProvider()
+        browser_session = (BrowserUseSessionAdapter() if headless is None
+                           else BrowserUseSessionAdapter(headless=headless))
+        executor = BrowserTaskExecutor(
+            browser_session,
+            ModelBrowserController(browser_provider, model=backend.browser_controller_model),
+            max_decisions=8,
+            completion_verifier=verifier,
+            action_chooser=JevBrowserActionChooser(
+                jev_provider, model=backend.local_jev_model, formulation="baseline"),
+            initial_action_candidates=True,
+            native_site_jev=True,
+        )
+    capability = JevBrowserCapability(executor)
     return capability, browser_session, browser_provider, jev_provider
 
 
@@ -151,7 +169,8 @@ async def run(args) -> None:
         await dialogue_client.aclose()
         await aclose_jevs(session.spine.global_jev, session.slot_extractor)
         await browser_session.close(kill_browser=True)
-        await browser_provider.aclose()
+        if browser_provider is not None:
+            await browser_provider.aclose()
         await browser_jev_provider.aclose()
 
 
