@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal judge-facing Gradio entrypoint for the hosted Browser.FIND demo."""
+"""Gradio entrypoint for hosted grounded browser tasks."""
 
 from __future__ import annotations
 
@@ -24,15 +24,21 @@ def build_app(runtime=None):
             f"Capability: {result.capability}" if result.capability else "",
             f"Goal: {result.goal_type}" if result.goal_type else "",
             f"Site: {result.site}" if result.site else "",
-            f"Target: {result.target}" if result.target else "",
+            f"Target/query: {result.target}" if result.target else "",
         ) if line)
         return (result.transcript, goal, result.planner, result.status,
                 result.message, result.final_url, result.page_title)
 
     with gr.Blocks(title="wepth voice agent") as app:
-        gr.Markdown("# wepth voice agent\nSpeech becomes a validated SemanticGoal. A deterministic planner selects the execution path; this hosted demo shows Level 2 Browser.FIND.")
+        gr.Markdown(
+            "# wepth voice agent\n"
+            "Speech becomes a validated SemanticGoal. A deterministic planner runs "
+            "Browser.FIND or Browser.SEARCH_WEBSITE through the selected grounded "
+            "browser backend. Browser actions run on the server; this page shows "
+            "their status and final URL, not a live Chrome window."
+        )
         audio = gr.Audio(sources=["microphone", "upload"], type="filepath", label="Recorded command")
-        text = gr.Textbox(label="Text fallback", placeholder="Find the Browser Use repository on GitHub")
+        text = gr.Textbox(label="Text fallback", placeholder="Search GitHub for browser-use")
         run = gr.Button("Submit")
         transcript = gr.Textbox(label="Transcript")
         goal = gr.Textbox(label="Semantic Goal", lines=4)

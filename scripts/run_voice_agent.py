@@ -58,7 +58,7 @@ class TextOutputSynthesizer:
         return None
 
 
-def build_browser_find(backend, *, headless=None, browser_backend=None):
+def build_browser_find(backend, *, headless=None, browser_backend=None, max_seconds=None):
     """Compose the same Level 2 executor and browser surface as the FIND demo."""
     selected = browser_backend or os.environ.get("BROWSER_BACKEND", "browser_use")
     if selected not in {"browser_use", "jev_ultrafast"}:
@@ -67,7 +67,8 @@ def build_browser_find(backend, *, headless=None, browser_backend=None):
     verifier = JevBrowserCompletionVerifier(jev_provider, model=backend.local_jev_model)
     if selected == "jev_ultrafast":
         from ping_ponder.agentic.jev_ultrafast_backend import JevUltrafastExecutor
-        executor = JevUltrafastExecutor(verifier, policy_model=backend.local_jev_model)
+        kwargs = {"max_seconds": max_seconds} if max_seconds is not None else {}
+        executor = JevUltrafastExecutor(verifier, policy_model=backend.local_jev_model, **kwargs)
         browser_session = executor
         browser_provider = None
     else:

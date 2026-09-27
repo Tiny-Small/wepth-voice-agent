@@ -90,6 +90,7 @@ SPOTIFY_GOALS = {
 }
 BROWSER_GOALS = {
     "FIND": (r"\bfind\b|\blocate\b|\blook\s+for\b",),
+    "SEARCH_WEBSITE": (r"\bsearch\s+(?!(?:the\s+web|google)\s+for\b)(?:on\s+)?[\w.-]+(?:\s+[\w.-]+){0,2}\s+for\b",),
     "SEARCH": (r"\bsearch\b|\bgoogle\b|\blook up\b",),
     "NAVIGATE": (r"\bgo to\b|\bnavigate\b|\bopen\b.*\bsite\b|\bvisit\b",),
     "BACK": (r"\bgo back\b|\bback\b",),

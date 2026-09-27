@@ -5,13 +5,19 @@ from dataclasses import replace
 import pytest
 
 from ping_ponder.agentic.browser_use_slice import (
-    BrowserAction, BrowserCompletionStatus, BrowserDecision, BrowserElement, BrowserObservation,
-    BrowserTaskExecutor, JevBrowserCompletionVerifier,
+    BrowserAction,
+    BrowserCompletionStatus,
+    BrowserDecision,
+    BrowserElement,
+    BrowserObservation,
+    BrowserTask,
+    BrowserTaskExecutor,
+    JevBrowserCompletionVerifier,
+    _completion_eligible,
 )
 from ping_ponder.agentic.goals import SemanticGoal
 from ping_ponder.providers.base import InferenceResponse
 from ping_ponder.providers.decisions import DecisionsResponse
-
 
 GOAL = SemanticGoal("Browser", "FIND", {"site": "GitHub", "target": "Browser Use repository"})
 SEARCH = BrowserObservation("search", "https://github.com/search?q=Browser+Use&type=repositories",
@@ -63,6 +69,56 @@ class Decisions:
         return InferenceResponse(value=DecisionsResponse.model_validate({"answers": {
             "completion": {"type": "choice", "choice": self.answer, "confidence": 0.95}
         }}), provider="fake", model=model, latency_seconds=0.01, retries=0, usage=None)
+
+
+@pytest.mark.asyncio
+async def test_site_search_finishes_on_matching_results_page_without_opening_a_result():
+    goal = SemanticGoal("Browser", "SEARCH_WEBSITE", {"site": "GitHub", "query": "Browser Use"})
+    browser, controller, decisions = Pages(), Controller(), Decisions("SATISFIED")
+
+    result = await BrowserTaskExecutor(
+        browser, controller,
+        completion_verifier=JevBrowserCompletionVerifier(decisions, model="jev"),
+    ).execute(goal)
+
+    assert result.completion.status is BrowserCompletionStatus.SATISFIED
+    assert result.observation.url == SEARCH.url
+    assert controller.calls == 0
+    assert len(decisions.calls) == 1
+
+
+def test_site_search_rejects_results_for_a_different_query_or_site():
+    goal = SemanticGoal("Browser", "SEARCH_WEBSITE", {"site": "GitHub", "query": "Browser Use"})
+    task = BrowserTask.from_semantic_goal(goal)
+
+    assert not _completion_eligible(task, replace(SEARCH, url="https://github.com/search?q=unrelated"))
+    assert not _completion_eligible(task, replace(SEARCH, url="https://example.org/search?q=Browser+Use"))
+    assert not _completion_eligible(task, replace(
+        SEARCH, url="https://github.com/search?q=Browser+Use&js_challenge=1"))
+
+
+def test_site_search_allows_arxiv_advanced_results_with_submitted_terms():
+    goal = SemanticGoal("Browser", "SEARCH_WEBSITE", {
+        "site": "arxiv.org", "query": "full-duplex voice agents",
+    })
+    observation = BrowserObservation(
+        "arxiv-results",
+        "https://arxiv.org/search/advanced?advanced=1&terms-0-term=full-duplex+voice+agents",
+        "Advanced Search | arXiv", "Showing 1–6 of 6 results", frozenset(), "results")
+
+    assert _completion_eligible(BrowserTask.from_semantic_goal(goal), observation)
+
+
+@pytest.mark.parametrize(("site", "url", "query"), [
+    ("Hugging Face", "https://huggingface.co/models?search=NuExtract", "NuExtract"),
+    ("arXiv", "https://arxiv.org/search/?query=full-duplex+voice+agents", "full-duplex voice agents"),
+])
+def test_site_search_accepts_spoken_site_names(site, url, query):
+    goal = SemanticGoal("Browser", "SEARCH_WEBSITE", {"site": site, "query": query})
+    observation = BrowserObservation("results", url, "Search results", "Results for " + query,
+                                     frozenset(), "results")
+
+    assert _completion_eligible(BrowserTask.from_semantic_goal(goal), observation)
 
 
 @pytest.mark.asyncio

@@ -91,7 +91,6 @@ class WindowsSpotifyAdapter:
         title = raw.get("title") or raw.get("track")
         artist = raw.get("artist")
         current_track = f"{artist} - {title}" if artist and title else title or None
-        changed_track = (artist, title) != self._baseline_track
         observed_query = raw.get("search_query")
         observed_results = raw.get("search_results")
         # The native Spotify window exposes its Chromium omnibox as an

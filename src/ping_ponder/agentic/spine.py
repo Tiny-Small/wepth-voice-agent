@@ -189,7 +189,6 @@ class VoiceActionSpine:
             profile_started = time.monotonic()
             schema = descriptor.schema(local.goal_type)
             stage["profile_selection_s"] = time.monotonic() - profile_started
-            builder_started = time.monotonic()
             build = await self.goal_builder.build(
                 capability=descriptor.name, schema=schema, utterance=utterance, final=final)
             stage["extraction_s"] = build.extraction_latency_s

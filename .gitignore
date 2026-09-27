@@ -236,6 +236,8 @@ playwright_profiles/
 /AGENT.md
 /AGENTS.md
 /graphify-out/
+# Generated browser evaluation reports and logs
+/eval/results/
 
 # Local editor and operating system files
 .idea/

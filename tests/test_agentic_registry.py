@@ -137,6 +137,39 @@ async def test_browser_local_criteria_distinguish_finding_from_opening_an_addres
 
 
 @pytest.mark.asyncio
+async def test_explicit_find_repository_is_not_downgraded_to_site_search():
+    descriptor = build_browser_descriptor(None)
+    provider = FakeDecisionsProvider("SEARCH_WEBSITE", confidence=0.66)
+    local = JevLocalJev(provider, model="local")
+
+    route = await local.interpret("Find browser use repository on github", descriptor=descriptor)
+
+    assert route.goal_type == "FIND"
+    assert route.raw_choice == "SEARCH_WEBSITE"
+
+
+@pytest.mark.asyncio
+async def test_explicit_site_search_keeps_search_website_goal():
+    descriptor = build_browser_descriptor(None)
+    provider = FakeDecisionsProvider("SEARCH_WEBSITE")
+    local = JevLocalJev(provider, model="local")
+
+    route = await local.interpret("Search GitHub for browser-use", descriptor=descriptor)
+
+    assert route.goal_type == "SEARCH_WEBSITE"
+
+
+@pytest.mark.asyncio
+async def test_find_search_results_keeps_search_website_goal():
+    descriptor = build_browser_descriptor(None)
+    local = JevLocalJev(FakeDecisionsProvider("SEARCH_WEBSITE"), model="local")
+
+    route = await local.interpret("Find search results for browser-use on GitHub", descriptor=descriptor)
+
+    assert route.goal_type == "SEARCH_WEBSITE"
+
+
+@pytest.mark.asyncio
 async def test_navigate_rejects_a_human_readable_item_as_a_destination():
     class NavigateLocal:
         async def interpret(self, utterance, *, descriptor):

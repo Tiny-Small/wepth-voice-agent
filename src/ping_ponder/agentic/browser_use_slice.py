@@ -301,9 +301,16 @@ class JevBrowserCompletionVerifier:
         self.model = model
 
     async def verify(self, task: BrowserTask, observation: BrowserObservation) -> BrowserCompletionStatus:
-        questions = {"completion": {
-            "type": "choice",
-            "instructions": (
+        if task.semantic_goal.goal_type == "SEARCH_WEBSITE":
+            instructions = (
+                "Does the CURRENT observed page show on-site search results for the requested query? "
+                "Choose SATISFIED only when the URL identifies the requested site and submitted query, "
+                "and visible grounded page text supports that search results are displayed. "
+                "A search form with unsubmitted text, a loading or error page, or results for another query "
+                "are not completion. Do not require opening an individual result."
+            )
+        else:
+            instructions = (
                 "Does the CURRENT observed page satisfy the supplied semantic browser goal? "
                 "Choose SATISFIED only when the URL/title and visible grounded page text support "
                 "the requested target and site as the destination. A search result, query string, "
@@ -313,7 +320,10 @@ class JevBrowserCompletionVerifier:
                 "possible sense is insufficient. Choose NOT_SATISFIED when the current page clearly "
                 "does not satisfy the goal. Otherwise choose UNCERTAIN. Do not infer content or "
                 "navigation that is absent from this observation."
-            ),
+            )
+        questions = {"completion": {
+            "type": "choice",
+            "instructions": instructions,
             "criteria": {
                 "SATISFIED": "The currently observed destination has strong grounded evidence for the goal.",
                 "NOT_SATISFIED": "The observed current page clearly fails the goal; continue browsing.",
@@ -360,6 +370,31 @@ def _completion_eligible(task: BrowserTask, observation: BrowserObservation) -> 
     # scheme/path/query. The deterministic exact-match check runs before this gate.
     if task.expected_url is not None:
         return observation.url == task.expected_url
+
+    if task.semantic_goal.goal_type == "SEARCH_WEBSITE":
+        from .capabilities.browser import resolve_navigation_target
+
+        site = task.semantic_goal.argument("site")
+        query = task.semantic_goal.argument("query")
+        if not site or not query:
+            return False
+        expected_host = urlsplit(resolve_navigation_target(site)).hostname
+        if not expected_host or host != expected_host.casefold().removeprefix("www."):
+            return False
+        def normalize(value: str) -> str:
+            return " ".join(value.casefold().split())
+        query_pairs = parse_qsl(parsed.query)
+        if {key.casefold() for key, _ in query_pairs}.intersection(
+            {"js_challenge", "jsc_token", "captcha"}
+        ):
+            return False
+        query_values = (value for key, value in query_pairs
+                        if key.casefold() in {"q", "query", "search", "search_query", "terms-0-term"})
+        if not any(normalize(value) == normalize(str(query)) for value in query_values):
+            return False
+        if observation.title.casefold().strip() in {"", "loading", "new tab", "just a moment"}:
+            return False
+        return bool(observation.dom.strip())
 
     # Browser-generated failure pages and search-engine result pages are transient
     # states, not destinations to ask the semantic verifier to bless.
@@ -671,11 +706,13 @@ class ModelBrowserController:
         memory: str,
     ) -> BrowserDecision:
         allowed = [action.value for action in available_actions]
+        site_search = task.semantic_goal.goal_type == "SEARCH_WEBSITE"
         request = {
             "intent": task.semantic_goal.goal_type,
             "site": task.semantic_goal.argument("site"),
             "target": task.target,
-            "success_condition": {"url_equals": task.expected_url} if task.expected_url else None,
+            "success_condition": ({"site_search_results_for": task.target} if site_search else
+                                  {"url_equals": task.expected_url} if task.expected_url else None),
             "observation_id": observation.observation_id,
             "url": observation.url,
             "title": observation.title,
@@ -684,6 +721,17 @@ class ModelBrowserController:
             "available_actions": allowed,
             "recent_memory": memory[-2000:],
         }
+        search_guidance = (
+            "When a stable search URL for the requested site can be constructed confidently, prefer "
+            "navigating there over opening the site's search UI. Do not guess an unfamiliar URL pattern. "
+            "For this website search, stop on the search results page once the query is submitted; "
+            "do not open an individual result. "
+            if site_search else
+            "When a stable search URL for the requested site can be constructed confidently, prefer "
+            "navigating there over opening the site's search UI. Do not guess an unfamiliar URL pattern "
+            "or assume a search result satisfies the goal; otherwise use grounded page controls and "
+            "verify the destination. "
+        )
         response = await self.provider.infer(
             model=self.model,
             messages=[
@@ -701,10 +749,7 @@ class ModelBrowserController:
                         "For every indexed action, copy the current observation_id exactly. Return a completion status "
                         "only when supported by page evidence. Never emit code, selectors, or actions outside the allowlist. "
                         "For send_keys, Enter is the only supported key and it must target the current observation. "
-                        "When a stable search URL for the requested site can be constructed confidently, prefer "
-                        "navigating there over opening the site's search UI. Do not guess an unfamiliar URL pattern "
-                        "or assume a search result satisfies the goal; otherwise use grounded page controls and "
-                        "verify the destination. "
+                        f"{search_guidance}"
                         "For an autocomplete field, click a matching suggestion once; if that leaves the URL unchanged, "
                         "press Enter to submit. Do not repeat the same action when recent_memory shows it made no progress. "
                         "If an action may change the page, return it alone."

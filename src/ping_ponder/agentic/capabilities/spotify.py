@@ -10,18 +10,13 @@ from __future__ import annotations
 import logging
 from typing import Any, Mapping
 
-from ping_ponder.observability import emit
-
 from ..goals import GoalSchema, SlotSpec
-from ..operators import ActionOperator, OperatorError, OperatorMetadata
+from ..operators import ActionOperator, OperatorMetadata
 from ..registry import CapabilityDescriptor
 from ..world import Arg, Compare, Condition, Effect, WorldState
 from ..adapters import MemorySpotifyAdapter, SpotifyAdapter
 
 logger = logging.getLogger(__name__)
-
-# Goal types are declared once, in the goal schemas below (see `{name.lower()}_goal_schemas`).
-_UNUSED_GOAL_TYPES = ("PLAY", "SEARCH", "PAUSE", "RESUME", "SKIP")
 
 WORLD_SCHEMA: Mapping[str, Any] = {
     "spotify.running": False,
@@ -41,50 +36,9 @@ WORLD_SCHEMA: Mapping[str, Any] = {
 SPOTIFY_WORLD_SCHEMA = WORLD_SCHEMA
 
 
-def _open(world: WorldState, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
-    emit(logger, "spotify_effect", action="OpenSpotify")
-    return {"spotify.running": True, "spotify.focused": True}
-
-
-def _search(world: WorldState, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
-    query = arguments["query"]
-    emit(logger, "spotify_effect", action="SearchSpotify", query=query)
-    return {"spotify.search_results": query}
-
-
 def _track_for(world: WorldState, arguments: Mapping[str, Any]) -> str:
     query = arguments.get("query") or world.get("spotify.search_results")
     return f"{query} - top result"
-
-
-def _play(world: WorldState, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
-    results = world.get("spotify.search_results")
-    query = arguments.get("query") or results
-    if not results:
-        raise OperatorError("PlayResult requires search results; Spotify is not showing anything to play")
-    emit(logger, "spotify_effect", action="PlayResult", query=query)
-    return {"spotify.current_track": f"{query} - top result", "spotify.paused": False,
-            "media.playing": True}
-
-
-def _pause(world: WorldState, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
-    emit(logger, "spotify_effect", action="PauseSpotify")
-    return {"spotify.paused": True, "media.playing": False}
-
-
-def _resume(world: WorldState, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
-    if world.get("spotify.current_track") is None:
-        raise OperatorError("ResumeSpotify requires a current track")
-    emit(logger, "spotify_effect", action="ResumeSpotify")
-    return {"spotify.paused": False, "media.playing": True}
-
-
-def _skip(world: WorldState, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
-    if world.get("spotify.current_track") is None:
-        raise OperatorError("SkipSpotify requires a current track")
-    emit(logger, "spotify_effect", action="SkipSpotify")
-    return {"spotify.skipped": True, "media.playing": True,
-            "spotify.paused": False}
 
 
 def spotify_goal_types() -> tuple[str, ...]:

@@ -225,12 +225,15 @@ class JevUltrafastExecutor:
                 self._agent.close()
                 self._agent = None
             started = time.monotonic()
-            agent = self.agent_factory(
-                _start_url(task),
-                f"Find {task.target}" + (
-                    f" on {task.semantic_goal.argument('site')}" if task.semantic_goal.argument("site") else ""
-                ) + ". Stop when the requested destination is open.",
-            )
+            site = task.semantic_goal.argument("site")
+            if task.semantic_goal.goal_type == "SEARCH_WEBSITE":
+                instruction = (f"Search {site} for {task.target}. Stop on the search results page "
+                               "after the query is submitted and the address contains the submitted query. "
+                               "An autocomplete menu is not the results page. Do not open an individual result.")
+            else:
+                instruction = (f"Find {task.target}" + (f" on {site}" if site else "")
+                               + ". Stop when the requested destination is open.")
+            agent = self.agent_factory(_start_url(task), instruction)
             self._agent = agent
             cycles = 0
             terminal = "timeout"
@@ -282,6 +285,15 @@ class JevUltrafastExecutor:
                 # A fresh observation, including after DONE/BLOCKED, is the only
                 # state allowed into the project's completion verifier.
                 page = agent.browser.observe(screenshot=False)
+                if task.semantic_goal.goal_type == "SEARCH_WEBSITE" and terminal == "done":
+                    pending_markers = ("try searching to get started", "loading results")
+                    deadline = min(started + self.max_seconds, time.monotonic() + 3.0)
+                    while (any(marker in str(page.get("text") or "").casefold()
+                               for marker in pending_markers)
+                           and time.monotonic() < deadline and not stop.is_set()):
+                        stop.wait(min(0.1, deadline - time.monotonic()))
+                        if not stop.is_set():
+                            page = agent.browser.observe(screenshot=False)
                 return dict(page), cycles, terminal, time.monotonic() - started
             except Exception:
                 agent.close()

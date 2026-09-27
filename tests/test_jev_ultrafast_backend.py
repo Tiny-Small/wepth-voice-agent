@@ -181,6 +181,53 @@ async def test_done_requires_fresh_grounded_verifier_approval():
 
 
 @pytest.mark.asyncio
+async def test_website_search_goal_stops_at_results_instead_of_opening_a_result():
+    FakeAgent.instances.clear()
+    goal = SemanticGoal("Browser", "SEARCH_WEBSITE", {"site": "YouTube", "query": "PersonaPlex"})
+    page = {"url": "https://www.youtube.com/results?search_query=PersonaPlex",
+            "title": "PersonaPlex - YouTube", "text": "PersonaPlex videos and channels",
+            "fingerprint": "search-results", "actions": []}
+    verifier = Verifier(BrowserCompletionStatus.SATISFIED)
+    executor = JevUltrafastExecutor(
+        verifier, agent_factory=lambda url, instruction: FakeAgent(url, instruction, page=page))
+
+    result = await executor.execute(goal)
+
+    assert result.completion.status is BrowserCompletionStatus.SATISFIED
+    assert FakeAgent.instances[-1].start_url == "https://www.youtube.com/"
+    assert "Search YouTube for PersonaPlex" in FakeAgent.instances[-1].goal
+    assert "results page" in FakeAgent.instances[-1].goal
+    assert "address contains the submitted query" in FakeAgent.instances[-1].goal
+    await executor.close()
+
+
+def test_website_search_waits_for_results_after_submitting_query():
+    goal = SemanticGoal("Browser", "SEARCH_WEBSITE", {"site": "YouTube", "query": "PersonaPlex"})
+    pending = {"url": "https://www.youtube.com/results?search_query=personaplex",
+               "title": "personaplex - YouTube",
+               "text": "Try searching to get started", "fingerprint": "pending", "actions": []}
+    loaded = {**pending, "text": "PersonaPlex videos and channels are shown in search results",
+              "fingerprint": "loaded"}
+
+    class LoadingAgent(FakeAgent):
+        def __init__(self, url, instruction):
+            super().__init__(url, instruction, page=pending)
+            self.observations = 0
+
+        def observe(self, screenshot=False):
+            self.observations += 1
+            return pending if self.observations == 1 else loaded
+
+    executor = JevUltrafastExecutor(Verifier(BrowserCompletionStatus.SATISFIED),
+                                    agent_factory=LoadingAgent)
+    page, _, terminal, _ = executor._run(BrowserTask.from_semantic_goal(goal), threading.Event())
+
+    assert terminal == "done"
+    assert "videos and channels" in page["text"]
+    executor._agent.close()
+
+
+@pytest.mark.asyncio
 async def test_verified_destination_is_satisfied_even_if_jev_blocks():
     FakeAgent.instances.clear()
     verifier = Verifier(BrowserCompletionStatus.SATISFIED)
@@ -505,7 +552,8 @@ def test_runner_selects_jev_without_building_browser_use_session(monkeypatch):
     monkeypatch.setattr(runner, "BrowserUseSessionAdapter", lambda **_: pytest.fail("Browser Use was built"))
     backend = SimpleNamespace(browser_controller_model="controller", local_jev_model="jev")
     capability, session, _, verifier_provider = runner.build_browser_find(
-        backend, browser_backend="jev_ultrafast")
+        backend, browser_backend="jev_ultrafast", max_seconds=45)
     assert isinstance(capability.executor, JevUltrafastExecutor)
     assert session is capability.executor
     assert capability.executor.completion_verifier.provider is verifier_provider
+    assert capability.executor.max_seconds == 45

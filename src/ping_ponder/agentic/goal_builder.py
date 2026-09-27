@@ -210,7 +210,7 @@ class GoalBuilder:
                 span = await self.extractor.extract(
                     utterance, slot.question, slot=slot.name, confidence_threshold=threshold)
             span.verify(utterance)
-        except NoAnswer as error:
+        except NoAnswer:
             # Partial transcripts are allowed to leave a required slot unanswered.
             return (ExtractionRecord(slot=slot.name, question=slot.question, filled=False,
                                      reason="no_answer" if final else "partial_no_answer"), None)

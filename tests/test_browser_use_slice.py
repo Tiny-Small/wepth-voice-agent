@@ -336,6 +336,24 @@ async def test_controller_prompt_separates_semantic_target_and_url_acceptance():
 
 
 @pytest.mark.asyncio
+async def test_site_search_controller_targets_results_page_without_opening_a_result():
+    class RecordingProvider:
+        async def infer(self, *, model, messages, response_model):
+            self.messages = messages
+            return SimpleNamespace(value=BrowserDecision(completion_status="uncertain"))
+
+    provider = RecordingProvider()
+    goal = SemanticGoal("Browser", "SEARCH_WEBSITE", {"site": "GitHub", "query": "browser-use"})
+    observation = await DestinationBrowser().observe()
+    await ModelBrowserController(provider, model="test/model").next_actions(
+        BrowserTask.from_semantic_goal(goal), observation, tuple(BrowserActionKind), "")
+
+    request = json.loads(provider.messages[1]["content"])
+    assert request["success_condition"] == {"site_search_results_for": "browser-use"}
+    assert "stop on the search results page" in provider.messages[0]["content"]
+
+
+@pytest.mark.asyncio
 async def test_same_url_dom_rewrite_stops_batch_and_reobserves():
     browser = FixtureBrowser()
     observed = await browser.observe()

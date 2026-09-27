@@ -7,7 +7,6 @@ other descriptor.
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
@@ -21,9 +20,6 @@ from ..adapters import BrowserAdapter, MemoryBrowserAdapter
 
 logger = logging.getLogger(__name__)
 
-# Goal types are declared once, in the goal schemas below (see `{name.lower()}_goal_schemas`).
-_UNUSED_GOAL_TYPES = ("SEARCH", "NAVIGATE", "BACK", "FORWARD")
-
 WORLD_SCHEMA: Mapping[str, Any] = {
     "browser.running": False,
     "browser.current_url": None,
@@ -36,6 +32,8 @@ WORLD_SCHEMA: Mapping[str, Any] = {
     "browser.can_back": False,
     "browser.can_forward": False,
     "browser.last_task_status": None,
+    "browser.last_task_goal_type": None,
+    "browser.last_task_site": None,
     "browser.last_task_target": None,
     "browser.last_task_evidence": {},
 }
@@ -47,55 +45,16 @@ _TRUSTED_SITE_URLS = {
     "youtube": "https://www.youtube.com/",
     "google": "https://www.google.com/",
     "github": "https://github.com/",
+    "hugging face": "https://huggingface.co/",
+    "huggingface": "https://huggingface.co/",
+    "arxiv": "https://arxiv.org/",
     "wikipedia": "https://www.wikipedia.org/",
 }
-
-
-def _open(world: WorldState, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
-    emit(logger, "browser_effect", action="OpenBrowser")
-    return {"browser.running": True}
-
-
-def _search(world: WorldState, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
-    query = arguments["query"]
-    emit(logger, "browser_effect", action="SearchWeb", query=query)
-    history = tuple(world.get("browser.history") or ())
-    return {"browser.search_results": query, "browser.current_url": f"search://{query}",
-            "browser.history": (*history, f"search://{query}"),
-            "browser.history_index": len(history)}
-
-
-def _navigate(world: WorldState, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
-    target = arguments["target"]
-    if not world.get("browser.running"):
-        raise OperatorError("NavigateURL requires an open browser")
-    emit(logger, "browser_effect", action="NavigateURL", target=target)
-    history = tuple(world.get("browser.history") or ())
-    return {"browser.current_url": target, "browser.history": (*history, target),
-            "browser.history_index": len(history)}
 
 
 def _resolved_navigation_target(world: WorldState, arguments: Mapping[str, Any]) -> str:
     """Project the same destination that the runtime adapter will navigate to."""
     return resolve_navigation_target(arguments["target"])
-
-
-def _back(world: WorldState, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
-    history = tuple(world.get("browser.history") or ())
-    index = int(world.get("browser.history_index") or 0)
-    if index <= 0:
-        raise OperatorError("Back requires browser history")
-    emit(logger, "browser_effect", action="Back")
-    return {"browser.history_index": index - 1, "browser.current_url": history[index - 1]}
-
-
-def _forward(world: WorldState, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
-    history = tuple(world.get("browser.history") or ())
-    index = int(world.get("browser.history_index") or 0)
-    if index + 1 >= len(history):
-        raise OperatorError("Forward requires forward history")
-    emit(logger, "browser_effect", action="Forward")
-    return {"browser.history_index": index + 1, "browser.current_url": history[index + 1]}
 
 
 def _history_entry(world: WorldState, index: int) -> Any:
@@ -307,25 +266,35 @@ def browser_operators(adapter: BrowserAdapter | None = None, *, browser_find: An
         ),
     ]
     if browser_find is not None:
-        async def find_with_grounding(world, arguments):
+        async def run_grounded(world, arguments, goal_type):
             from ..goals import SemanticGoal
 
+            target_name = "query" if goal_type == "SEARCH_WEBSITE" else "target"
             goal = SemanticGoal(
-                capability="Browser", goal_type="FIND",
-                arguments={name: arguments[name] for name in ("site", "target") if name in arguments},
+                capability="Browser", goal_type=goal_type,
+                arguments={name: arguments[name] for name in ("site", target_name) if name in arguments},
             )
             emit(logger, "browser_find_handoff", goal=goal.describe())
-            result, updated = await browser_find.execute(goal, world)
+            result, _ = await browser_find.execute(goal, world)
             changes = result.world_changes()
-            changes["browser.last_task_target"] = arguments["target"]
+            changes["browser.last_task_goal_type"] = goal_type
+            changes["browser.last_task_site"] = arguments.get("site")
+            changes["browser.last_task_target"] = arguments[target_name]
             emit(logger, "browser_find_result", status=result.completion.status.value,
                  evidence=changes["browser.last_task_evidence"])
             keys = (
                 "browser.running", "browser.current_url", "browser.current_domain",
-                "browser.last_task_status", "browser.last_task_target",
+                "browser.last_task_status", "browser.last_task_goal_type",
+                "browser.last_task_site", "browser.last_task_target",
                 "browser.last_task_evidence",
             )
             return {key: changes[key] for key in keys}
+
+        async def find_with_grounding(world, arguments):
+            return await run_grounded(world, arguments, "FIND")
+
+        async def search_website_with_grounding(world, arguments):
+            return await run_grounded(world, arguments, "SEARCH_WEBSITE")
 
         operators.append(ActionOperator(
             name="FindWithGroundedBrowser",
@@ -336,11 +305,32 @@ def browser_operators(adapter: BrowserAdapter | None = None, *, browser_find: An
                 Effect("browser.current_url", derive=lambda world, args: world.get("browser.current_url")),
                 Effect("browser.current_domain", derive=lambda world, args: world.get("browser.current_domain")),
                 Effect("browser.last_task_status", "satisfied"),
+                Effect("browser.last_task_goal_type", "FIND"),
+                Effect("browser.last_task_site", derive=lambda world, args: args.get("site")),
                 Effect("browser.last_task_target", Arg("target")),
                 Effect("browser.last_task_evidence", derive=lambda world, args: world.get("browser.last_task_evidence")),
             ),
             cost=1.0,
             executor=find_with_grounding,
+            metadata=OperatorMetadata(
+                self_observing=True, terminal_on_execution=True, idempotent=False,
+            ),
+        ))
+        operators.append(ActionOperator(
+            name="SearchWebsiteWithGroundedBrowser",
+            parameters=("site", "query"),
+            effects=(
+                Effect("browser.running", True),
+                Effect("browser.current_url", derive=lambda world, args: world.get("browser.current_url")),
+                Effect("browser.current_domain", derive=lambda world, args: world.get("browser.current_domain")),
+                Effect("browser.last_task_status", "satisfied"),
+                Effect("browser.last_task_goal_type", "SEARCH_WEBSITE"),
+                Effect("browser.last_task_site", Arg("site")),
+                Effect("browser.last_task_target", Arg("query")),
+                Effect("browser.last_task_evidence", derive=lambda world, args: world.get("browser.last_task_evidence")),
+            ),
+            cost=1.0,
+            executor=search_website_with_grounding,
             metadata=OperatorMetadata(
                 self_observing=True, terminal_on_execution=True, idempotent=False,
             ),
@@ -353,6 +343,21 @@ def browser_goal_schemas() -> Mapping[str, GoalSchema]:
         "OPEN": GoalSchema("OPEN", satisfied_when=(Condition("browser.running"),)),
         "SEARCH": GoalSchema("SEARCH", slots=(SlotSpec("query", "What does the user want to search for?"),),
                              satisfied_when=(Condition("browser.search_results", Compare.EQ, Arg("query")),)),
+        "SEARCH_WEBSITE": GoalSchema(
+            "SEARCH_WEBSITE",
+            intent_description=("Search within a named website and stop on its search results page; "
+                                "do not open an individual result"),
+            slots=(
+                SlotSpec("site", "Which website should be searched?"),
+                SlotSpec("query", "What should be entered into that website's search?"),
+            ),
+            satisfied_when=(
+                Condition("browser.last_task_status", Compare.EQ, "satisfied"),
+                Condition("browser.last_task_goal_type", Compare.EQ, "SEARCH_WEBSITE"),
+                Condition("browser.last_task_site", Compare.EQ, Arg("site")),
+                Condition("browser.last_task_target", Compare.EQ, Arg("query")),
+            ),
+        ),
         "NAVIGATE": GoalSchema(
             "NAVIGATE",
             intent_description=("Open a specific URL, domain, or trusted site alias supplied by the user"),

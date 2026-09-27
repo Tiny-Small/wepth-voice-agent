@@ -13,6 +13,7 @@ not be selected or reinterpreted because some action happens to be executable.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 
@@ -198,10 +199,20 @@ class JevLocalJev:
                  capability=descriptor.name, error_type="unknown_goal", choice=choice)
             raise StructuredOutputError(f"Local Jev returned an unknown goal '{choice}'")
         goal_type = None if choice == NONE_CAPABILITY else choice
+        confidence = answer.confidence
+        if (descriptor.name == "Browser" and choice == "SEARCH_WEBSITE"
+                and "FIND" in descriptor.goal_schemas
+                and re.match(r"^\s*(?:please\s+)?(?:find|locate)\b", utterance, re.IGNORECASE)
+                and not re.search(r"\bsearch\s+results?\b", utterance, re.IGNORECASE)):
+            # Explicit destination requests must not stop at a site's results page.
+            goal_type = "FIND"
+            confidence = None
+            emit(logger, "local_jev_choice_corrected", capability=descriptor.name,
+                 raw_choice=choice, goal_type=goal_type, reason="explicit_find_destination")
         emit(logger, "local_jev_interpretation", model=response.model, capability=descriptor.name,
-             wall_latency_ms=response.latency_seconds * 1000, goal_type=goal_type,
-             confidence=answer.confidence)
-        return LocalRoute(capability=descriptor.name, goal_type=goal_type, confidence=answer.confidence,
+                 wall_latency_ms=response.latency_seconds * 1000, goal_type=goal_type,
+                 confidence=confidence, raw_choice=choice)
+        return LocalRoute(capability=descriptor.name, goal_type=goal_type, confidence=confidence,
                           raw_choice=choice, latency_seconds=response.latency_seconds)
 
 

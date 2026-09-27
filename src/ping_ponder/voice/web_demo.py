@@ -96,7 +96,7 @@ async def transcribe_recording(path: str, *, api_key: str | None = None,
 
 
 class HostedDemo:
-    """One serialized hosted session; only Browser.FIND may reach execution."""
+    """One serialized hosted session for grounded browser goals."""
 
     def __init__(self, *, session, browser_find, transcribe: Callable[[str], Awaitable[str]] | None = None):
         self.session = session
@@ -130,16 +130,18 @@ class HostedDemo:
                     "capability": semantic_goal.capability,
                     "goal_type": semantic_goal.goal_type,
                     "site": str(semantic_goal.argument("site") or ""),
-                    "target": str(semantic_goal.argument("target") or ""),
+                    "target": str(semantic_goal.argument("target") or semantic_goal.argument("query") or ""),
                 }
-            if evaluation.capability != "Browser" or evaluation.local_goal_type != "FIND":
+            if evaluation.capability != "Browser" or evaluation.local_goal_type not in {"FIND", "SEARCH_WEBSITE"}:
                 if evaluation.capability:
                     return DemoResult(utterance, goal, "UNSUPPORTED",
                                       "This action is available in the local desktop agent but is disabled in the hosted demo.",
                                       **goal_fields)
-                return DemoResult(utterance, goal, "NOT_UNDERSTOOD", "Could not identify a supported Browser.FIND goal.")
+                return DemoResult(utterance, goal, "NOT_UNDERSTOOD",
+                                  "Could not identify a supported browser goal.")
             if not evaluation.build or not evaluation.build.complete:
-                return DemoResult(utterance, goal, "INCOMPLETE", "Browser.FIND needs a target; try naming a site too.",
+                return DemoResult(utterance, goal, "INCOMPLETE",
+                                  "Name a website and what you want to search or find.",
                                   **goal_fields)
             try:
                 outcome = await self.session.spine.reconcile_final(evaluation)
@@ -150,7 +152,8 @@ class HostedDemo:
             browser_status = world.get("browser.last_task_status")
             evidence = world.get("browser.last_task_evidence") or {}
             status = "SATISFIED" if outcome.satisfied else str(browser_status or (outcome.report.outcome.value if outcome.report else "UNCERTAIN")).upper()
-            message = "Found it." if outcome.satisfied else "Browser.FIND could not verify a result."
+            message = ("Found it." if outcome.satisfied else
+                       "The browser could not verify the requested result.")
             planner = " → ".join(record.step.operator.name for record in outcome.report.records) if outcome.report else ""
             return DemoResult(utterance, goal, status, message,
                               str(evidence.get("url") or ""), str(evidence.get("title") or ""),
@@ -172,5 +175,6 @@ class HostedRuntime:
     async def close(self):
         await aclose_jevs(self.session.spine.global_jev, self.session.slot_extractor)
         await self.browser_session.close(kill_browser=True)
-        await self.browser_provider.aclose()
+        if self.browser_provider is not None:
+            await self.browser_provider.aclose()
         await self.browser_jev_provider.aclose()
