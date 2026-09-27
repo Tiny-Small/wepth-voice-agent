@@ -1,63 +1,166 @@
 # wepth-voice-agent
 
-`wepth-voice-agent` is a voice-driven action agent that turns speech into an explicit, validated `SemanticGoal` before choosing how to act. AssemblyAI supplies speech-to-text; Global and Local Jev select the capability and goal schema, structured extraction fills its slots, and GoalBuilder validates the result. `DeterministicPlanner` then selects capability-specific operators. Straightforward commands use direct operators; open-ended `Browser.FIND` tasks use the Level 2 browser path.
+`wepth-voice-agent` is a voice-driven action agent that turns natural-language commands into an explicit, validated `SemanticGoal` before deciding how to act.
 
-The intermediate goal separates **what the user wants** from **how the system executes it**. The planner uses WorldState to choose an action, and execution updates that state so the outcome can be observed. The local runtime also provides realtime streaming voice interaction and spoken acknowledgements, progress updates, and results.
+AssemblyAI provides speech-to-text. Global and Local Jev select the capability and goal schema, a structured extractor fills the required slots, and `GoalBuilder` validates the result. A deterministic planner then chooses the execution path.
+
+The key idea is to separate **what the user wants** from **how the system executes it**.
+
+Straightforward commands use deterministic operators. More open-ended browser tasks such as `Browser.FIND` and `Browser.SEARCH_WEBSITE` use a grounded Level 2 browser path.
 
 ## Architecture
 
 ```text
 Voice / text command
         ↓
-AssemblyAI STT (voice input)
+AssemblyAI STT
         ↓
 Global Jev → Local Jev → GoalSchema
         ↓
-Structured slot extraction → GoalBuilder validation
+Structured slot extraction
         ↓
-SemanticGoal → DeterministicPlanner
+GoalBuilder validation
         ↓
-Direct capability operator OR Level 2 Browser.FIND operator
+SemanticGoal
+        ↓
+DeterministicPlanner
+        ↓
+Direct capability operator
+        OR
+Grounded Browser.FIND / SEARCH_WEBSITE
         ↓
 Executor / WorldState
         ↓
 Result
 ```
 
-The planner does not act on raw transcript text. For example:
+The planner acts on the validated `SemanticGoal`, not directly on raw transcript text.
 
-| Command | Semantic goal | Planner operator / path |
+### Examples
+
+| Command | Semantic goal | Execution path |
 | --- | --- | --- |
-| “Open GitHub” | `Browser.NAVIGATE` | `OpenBrowser` → `NavigateURL` from a closed browser; `NavigateURL` when already open |
-| “Find the Browser Use repository on GitHub” | `Browser.FIND(site='GitHub', target='Browser Use repository')` | `FindWithGroundedBrowser` (Level 2 browser execution) |
+| “Open GitHub” | `Browser.NAVIGATE` | Deterministic browser navigation |
+| “Find the Browser Use repository on GitHub” | `Browser.FIND(site='GitHub', target='Browser Use repository')` | `FindWithGroundedBrowser` |
+| “Search GitHub for browser-use” | `Browser.SEARCH_WEBSITE(site='GitHub', query='browser-use')` | `SearchWebsiteWithGroundedBrowser` |
 
-`Browser.FIND` extends the same goal and planning flow with `JevBrowserCapability` → `BrowserTaskExecutor` → `BrowserUseSessionAdapter` when the task needs grounded browser interaction.
+The grounded browser path uses the existing `JevBrowserCapability` execution layer with either Browser Use or the optional Jev Ultrafast backend.
+
+## Hosted demo
+
+The judge-facing Gradio demo shows:
+
+- the transcript;
+- the constructed `SemanticGoal`;
+- the planner operator;
+- execution status;
+- the final result URL.
+
+The hosted demo supports voice or text input and executes `Browser.FIND` and `Browser.SEARCH_WEBSITE` in a server-side headless browser.
+
+Example:
+
+```text
+Transcript:
+Find the Browser Use repository on GitHub
+
+Semantic Goal:
+Capability: Browser
+Goal: FIND
+Site: GitHub
+Target: Browser Use repository
+
+Planner:
+FindWithGroundedBrowser
+
+Status:
+SATISFIED
+
+Result:
+Found it.
+
+Final URL:
+https://github.com/browser-use/browser-use
+```
+
+The local runtime additionally supports realtime streaming microphone input, spoken acknowledgements and progress updates, TTS, Spotify control, and native browser actions.
 
 ## Setup
 
-Use Python 3.12 or newer. From this repository:
+Requires Python 3.12+.
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[voice,test]'
+
+python -m pip install -e '.[voice,web,jev,test]'
+playwright install chromium
 ```
 
-The `voice` extra installs AssemblyAI, sounddevice, and the pinned Browser Use version. Browser Use needs a browser available on the machine. On systems where it has not been installed yet, run `playwright install chromium`. Native browser and Spotify operators use the included PowerShell adapters on Windows; the default simulated backend is suitable for tests and control diagnostics.
+Copy `.env.example` to `.env` and add your credentials.
+The scripts read environment variables; they do not load `.env` automatically.
+In a compatible shell, load it with `set -a; source .env; set +a` before running
+the agent.
 
-Copy `.env.example` to `.env`, enter your keys, and load it into the shell. The script reads environment variables; it does not load `.env` automatically. `OPENROUTER_API_KEY` is needed for the default OpenRouter voice/TTS and live Jev, Llama extraction, and Browser.FIND controller. `ASSEMBLYAI_API_KEY` is needed for microphone input. Set `AGENTIC_JEV_BACKEND=live` and `AGENTIC_EXTRACTOR=llama` to use the intended live semantic path. `AGENTIC_LLAMA_MODEL` defaults to `meta-llama/llama-3.1-8b-instruct`. The browser controller defaults to `openai/gpt-4.1`; override it with `AGENTIC_LUNA_MODEL` or select `AGENTIC_BROWSER_CONTROLLER=llama`. Set `AGENTIC_EXECUTION_BACKEND=desktop` for native direct browser actions on Windows; the default is `simulated`.
+At minimum, the intended live path uses:
 
-For example, load a local `.env` with `set -a; source .env; set +a` in a compatible shell. Keep credentials out of Git.
+```env
+ASSEMBLYAI_API_KEY=...
+OPENROUTER_API_KEY=...
 
-## Run
+AGENTIC_JEV_BACKEND=live
+AGENTIC_EXTRACTOR=llama
+```
+
+The default structured-extraction model is:
+
+```text
+meta-llama/llama-3.1-8b-instruct
+```
+
+Keep credentials out of Git.
+
+## Run locally
+
+### Realtime voice agent
 
 ```bash
 python scripts/run_voice_agent.py --show-transcripts --verbose-control
 ```
 
-Use `--text-output` to print replies instead of playing TTS. Use `--text-input 'Open GitHub' --text-output --verbose-control` to diagnose semantics and control without a microphone. A second `--text-input` sends another final turn sequentially. `--progress-silence-seconds` defaults to `2.5`. `--help` lists audio device, STT silence, model, and endpoint options.
+Use `--text-output` to print responses instead of playing TTS.
+For real local Spotify playback, set `AGENTIC_EXECUTION_BACKEND=desktop`;
+`simulated` only updates in-memory state.
 
-With `--show-transcripts`, expect `Final: Open GitHub`; with `--verbose-control`, inspect the constructed goal and planner/executor events for `Browser.NAVIGATE`. For `Find the Browser Use repository on GitHub`, expect a `Browser.FIND` goal, Level 2 browser decisions, and a final result such as `Found it.` when completion is verified. The browser target is `https://github.com/browser-use/browser-use`. If a newer turn or revision arrives, old FIND work and its pending speech are cancelled. Logs can expose spoken text and target URLs; review them before sharing.
+For a text-only control-path check:
+
+```bash
+python scripts/run_voice_agent.py \
+  --text-input 'Find the Browser Use repository on GitHub' \
+  --text-output \
+  --verbose-control
+```
+
+### Gradio demo
+
+```bash
+python app.py --host 0.0.0.0 --port 7860
+```
+
+Then open:
+
+```text
+http://localhost:7860
+```
+
+Typed input bypasses transcription. Recorded microphone input uses AssemblyAI speech-to-text before entering the same semantic/control pipeline.
+
+## Browser backends
+
+`browser_use` is the default grounded browser backend.
+
+An experimental `jev_ultrafast` backend is also available. See
+[docs/jev-backend.md](docs/jev-backend.md) for setup and troubleshooting.
 
 ## Tests
 
@@ -65,68 +168,40 @@ With `--show-transcripts`, expect `Final: Open GitHub`; with `--verbose-control`
 python -m pytest -q tests
 ```
 
-Desktop acceptance tests are skipped unless `AGENTIC_DESKTOP_TESTS=1`. Most runtime tests use mocks and do not need a microphone or credentials.
+Most tests use mocks and do not require a microphone or live API credentials.
 
-## Hosted web demo
+Desktop acceptance tests are skipped unless explicitly enabled.
 
-Install with `python -m pip install -e '.[voice,web]'`, then install Chromium with
-`playwright install chromium` (and its Linux system libraries if the image needs them).
-Load `.env` into the shell as above, then run:
+## Evaluation
 
-```bash
-python app.py --host 0.0.0.0 --port 7860
-```
+We evaluated the grounded browser path on destination-finding and site-search tasks across several public websites.
 
-The port defaults to 7860 and can also be set with `GRADIO_SERVER_PORT`.
-Set `OPENROUTER_API_KEY`, `AGENTIC_JEV_BACKEND=live`, and
-`AGENTIC_EXTRACTOR=llama` for the intended semantic path. Set
-`ASSEMBLYAI_API_KEY` to use recorded microphone or uploaded audio; typed text
-bypasses transcription. The browser runs headless on the server. This judge-facing
-demo shows the transcript, structured goal, selected planner operator, status,
-and result URL for `Browser.FIND`. It serializes submissions through one browser
-session. The local runtime additionally supports realtime streaming voice
-interaction, spoken acknowledgements/progress/results, and desktop-only
-capabilities such as Spotify and native browser actions.
+See [docs/evaluation.md](docs/evaluation.md) for the full methodology and results.
+The task list is in `eval/find_tasks.json`. Generated JSON reports and logs go in
+`eval/results/`, which Git ignores; keep the summary in `docs/evaluation.md`.
 
 ## Inspiration and acknowledgements
 
-The initial idea of using Jev for low-latency, bounded intent and action selection
-came from [Evolving AI Instagram post](https://www.instagram.com/reel/DdjIOcstTtn/)
-that featured a video credited as “Source: X / Andy Gao.” `wepth-voice-agent`
-adds structured goal schemas, slot extraction, GoalBuilder validation, deterministic
-planning, WorldState, selective Level 2 browser execution, and realtime voice
-and control orchestration.
+The initial idea of using Jev for low-latency, bounded intent and action selection was inspired by an Evolving AI repost credited to Andy Gao on X.
 
-Browser automation for the Level 2 `Browser.FIND` path builds on the external
-open-source [Browser Use](https://github.com/browser-use/browser-use) project,
-consumed here as the pinned `browser-use==0.13.10` dependency.
+`wepth-voice-agent` extends that idea with:
 
-### Experimental Jev Ultrafast Level 2 backend
+- structured goal schemas;
+- structured slot extraction;
+- `GoalBuilder` validation;
+- deterministic planning;
+- `WorldState`;
+- selective Level 2 browser execution;
+- realtime voice/control orchestration.
 
-`BROWSER_BACKEND=browser_use` remains the default. To evaluate the alternative,
-install `pip install '.[voice,jev]'` and set `BROWSER_BACKEND=jev_ultrafast`.
-The existing `OPENROUTER_API_KEY` sends Jev's policy choices through OpenRouter
-Decisions using `AGENTIC_LOCAL_JEV_MODEL`, and also supplies its `TYPE_TEXT`
-helper through OpenRouter's chat completions endpoint. If `TYPESAFE_API_KEY` is
-set, policy choices use upstream TypeSafe directly instead; `TYPESAFE_MODEL`
-then controls that provider. The default `TYPE_TEXT` model is
-`inception/mercury-2.5`, using Jev's low reasoning setting for its JSON
-response. Optional text overrides are `TEXT_MODEL_API_KEY`,
-`TEXT_MODEL_BASE_URL`, `TEXT_MODEL`, and `TEXT_MODEL_REASONING`. The `jev` extra
-installs the Jev package from the pinned `Tiny-Small/jev-ultrafast` fork commit
-`98d45b6e91565468f343d9e3bdf5de0cf7632b15`. That branch adds an observed
-`PRESS_ENTER` action for populated search fields so sites without a visible
-submit control can run a search. The fork also supplies Jev's Browser Harness
-and HTTP/2 dependencies; this project does not copy Jev's core source.
+Browser automation for the Level 2 `Browser.FIND` path builds on the open-source [Browser Use](https://github.com/browser-use/browser-use) project.
 
-The `FIND` operator and grounded completion verifier remain shared. Jev's
-`DONE` only stops its action loop. The adapter observes the final tab and asks
-the existing verifier; a `NOT_SATISFIED` or `UNCERTAIN` answer cannot become
-success. No automatic fallback to Browser Use occurs. Jev owns a Browser
-Harness tab in an existing Chrome profile and does not attach to the Browser
-Use session; its final URL is recorded in the task result and the tab remains
-open until the runtime closes the backend. Its synchronous requests run in a
-worker thread, so cancellation stops before the next action, but an already
-running browser action cannot be interrupted. Live comparison requires Chrome
-with Browser Harness connected and an OpenRouter key. The policy redirect is
-scoped to each Jev prediction and restores the package transport afterward.
+The optional browser backend builds on the external open-source [Jev Ultrafast](https://github.com/browser-use/jev-ultrafast) project. This repository evaluates a modified [Tiny-Small fork](https://github.com/Tiny-Small/jev-ultrafast) pinned in `pyproject.toml`.
+
+## Current limits
+
+- The hosted demo exposes grounded browser search/finding rather than desktop Spotify or native local-app control.
+- Hosted microphone input is push-to-talk; the local CLI supports realtime streaming speech.
+- Browser behavior depends on third-party websites whose markup and search results may change.
+- This is a bounded action agent, not a general-purpose web-search service.
+- A semantically correct destination can still be marked `UNCERTAIN` when the verifier lacks enough grounded evidence.
