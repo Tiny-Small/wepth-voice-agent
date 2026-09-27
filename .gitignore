@@ -229,3 +229,15 @@ __marimo__/
 *.ogg
 browser_profiles/
 playwright_profiles/
+
+# Local agent tooling and generated knowledge graph
+/.agents/
+/.codex/
+/AGENT.md
+/AGENTS.md
+/graphify-out/
+
+# Local editor and operating system files
+.idea/
+.vscode/
+.DS_Store
