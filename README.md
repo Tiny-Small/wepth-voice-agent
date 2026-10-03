@@ -205,3 +205,7 @@ The optional browser backend builds on the external open-source [Jev Ultrafast](
 - Browser behavior depends on third-party websites whose markup and search results may change.
 - This is a bounded action agent, not a general-purpose web-search service.
 - A semantically correct destination can still be marked `UNCERTAIN` when the verifier lacks enough grounded evidence.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
